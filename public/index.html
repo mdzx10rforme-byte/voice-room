@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1e1f22">
+<title>ভয়েস রুম</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:#1e1f22;color:#eee;min-height:100vh}
+.wrap{max-width:480px;margin:0 auto;padding:20px}
+h1{font-size:22px}
+input,button{width:100%;padding:14px;margin:6px 0;border-radius:10px;border:0;font-size:16px}
+input{background:#2b2d31;color:#fff}
+button{background:#5865f2;color:#fff;font-weight:600}
+button.red{background:#da373c}
+button.gray{background:#4e5058}
+#room{display:none}
+.p{display:flex;align-items:center;gap:12px;background:#2b2d31;padding:12px;border-radius:10px;margin:6px 0}
+.av{width:42px;height:42px;border-radius:50%;background:#5865f2;display:flex;align-items:center;justify-content:center;font-weight:700;border:3px solid transparent}
+.av.talk{border-color:#23a559}
+#chat{height:140px;overflow:auto;background:#2b2d31;border-radius:10px;padding:10px;font-size:14px}
+.row{display:flex;gap:8px}.row button{width:90px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎧 ভয়েস রুম</h1>
+
+  <div id="login">
+    <input id="name" placeholder="আপনার নাম" maxlength="20">
+    <input id="code" placeholder="রুম কোড (বন্ধুদের একই কোড দিন)" maxlength="30">
+    <button id="joinBtn">রুমে ঢুকুন</button>
+    <p id="err" style="color:#f66"></p>
+  </div>
+
+  <div id="room">
+    <p>রুম: <b id="rname"></b></p>
+    <div id="list"></div>
+    <button id="mute" class="gray">🎤 মাইক চালু</button>
+    <div id="chat"></div>
+    <div class="row">
+      <input id="msg" placeholder="মেসেজ লিখুন">
+      <button id="send">পাঠান</button>
+    </div>
+    <button id="leave" class="red">বের হন</button>
+  </div>
+  <div id="audios"></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+let socket, local, myName, muted = false;
+const peers = {};          // id -> {pc, name}
+const talking = {};        // id -> bool
+let actx;
+
+$('name').value = localStorage.getItem('vr_name') || '';
+$('code').value = localStorage.getItem('vr_code') || '';
+
+$('joinBtn').onclick = async () => {
+  myName = $('name').value.trim();
+  const room = $('code').value.trim();
+  if (!myName || !room) { $('err').textContent = 'নাম ও রুম কোড দিন'; return; }
+  try {
+    local = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+  } catch (e) { $('err').textContent = 'মাইক্রোফোনের অনুমতি দিন'; return; }
+  localStorage.setItem('vr_name', myName);
+  localStorage.setItem('vr_code', room);
+  actx = new (window.AudioContext || window.webkitAudioContext)();
+  watch(local, 'me');
+  connect(room);
+  $('login').style.display = 'none';
+  $('room').style.display = 'block';
+  $('rname').textContent = room;
+  render();
+};
+
+function connect(room) {
+  socket = io();
+  socket.on('connect', () => socket.emit('join', { room, name: myName }));
+  socket.on('full', () => { alert('রুম ভরে গেছে'); leave(); });
+  socket.on('peers', (list) => list.forEach((p) => addPeer(p.id, p.name, true)));
+  socket.on('signal', async ({ from, name, data }) => {
+    if (!peers[from]) addPeer(from, name, false);
+    const pc = peers[from].pc;
+    try {
+      if (data.sdp) {
+        await pc.setRemoteDescription(data.sdp);
+        if (data.sdp.type === 'offer') {
+          await pc.setLocalDescription(await pc.createAnswer());
+          socket.emit('signal', { to: from, data: { sdp: pc.localDescription } });
+        }
+      } else if (data.ice) {
+        await pc.addIceCandidate(data.ice);
+      }
+    } catch (e) {}
+  });
+  socket.on('left', (id) => {
+    if (peers[id]) { peers[id].pc.close(); delete peers[id]; delete talking[id]; }
+    const a = $('au_' + id); if (a) a.remove();
+    render();
+  });
+  socket.on('chat', ({ name, text }) => {
+    const d = document.createElement('div');
+    d.textContent = name + ': ' + text;
+    $('chat').appendChild(d);
+    $('chat').scrollTop = 1e9;
+  });
+}
+
+function addPeer(id, name, initiator) {
+  const pc = new RTCPeerConnection(ICE);
+  peers[id] = { pc, name };
+  local.getTracks().forEach((t) => pc.addTrack(t, local));
+  pc.onicecandidate = (e) => e.candidate &&
+    socket.emit('signal', { to: id, data: { ice: e.candidate } });
+  pc.ontrack = (e) => {
+    let a = $('au_' + id);
+    if (!a) { a = document.createElement('audio'); a.id = 'au_' + id; a.autoplay = true; $('audios').appendChild(a); }
+    a.srcObject = e.streams[0];
+    watch(e.streams[0], id);
+  };
+  if (initiator) {
+    pc.onnegotiationneeded = async () => {
+      await pc.setLocalDescription(await pc.createOffer());
+      socket.emit('signal', { to: id, data: { sdp: pc.localDescription } });
+    };
+  }
+  render();
+}
+
+function watch(stream, id) {
+  const src = actx.createMediaStreamSource(stream);
+  const an = actx.createAnalyser(); an.fftSize = 512;
+  src.connect(an);
+  const buf = new Uint8Array(an.fftSize);
+  setInterval(() => {
+    an.getByteTimeDomainData(buf);
+    let max = 0; for (const v of buf) max = Math.max(max, Math.abs(v - 128));
+    const t = max > 12 && !(id === 'me' && muted);
+    if (talking[id] !== t) { talking[id] = t; render(); }
+  }, 150);
+}
+
+function render() {
+  const rows = [{ id: 'me', name: myName + ' (আপনি)' }]
+    .concat(Object.entries(peers).map(([id, p]) => ({ id, name: p.name })));
+  $('list').innerHTML = '';
+  rows.forEach((r) => {
+    const d = document.createElement('div'); d.className = 'p';
+    const av = document.createElement('div');
+    av.className = 'av' + (talking[r.id] ? ' talk' : '');
+    av.textContent = (r.name || '?')[0];
+    const n = document.createElement('span'); n.textContent = r.name;
+    d.append(av, n); $('list').appendChild(d);
+  });
+}
+
+$('mute').onclick = () => {
+  muted = !muted;
+  local.getAudioTracks().forEach((t) => (t.enabled = !muted));
+  $('mute').textContent = muted ? '🔇 মাইক বন্ধ' : '🎤 মাইক চালু';
+  $('mute').className = muted ? 'red' : 'gray';
+};
+$('send').onclick = () => {
+  const t = $('msg').value.trim();
+  if (t) { socket.emit('chat', t); $('msg').value = ''; }
+};
+$('msg').onkeydown = (e) => e.key === 'Enter' && $('send').click();
+$('leave').onclick = leave;
+
+function leave() {
+  Object.values(peers).forEach((p) => p.pc.close());
+  if (socket) socket.disconnect();
+  if (local) local.getTracks().forEach((t) => t.stop());
+  location.reload();
+}
+</script>
+</body>
+</html>

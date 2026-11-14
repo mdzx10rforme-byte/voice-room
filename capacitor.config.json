@@ -1,0 +1,9 @@
+{
+  "appId": "com.friends.voiceroom",
+  "appName": "ভয়েস রুম",
+  "webDir": "www",
+  "server": {
+    "url": "https://YOUR-APP.onrender.com",
+    "cleartext": false
+  }
+}
