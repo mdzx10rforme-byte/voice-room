@@ -73,6 +73,7 @@ $('joinBtn').onclick = async () => {
   localStorage.setItem('vr_code', room);
   actx = new (window.AudioContext || window.webkitAudioContext)();
   watch(local, 'me');
+  startBg();
   connect(room);
   $('login').style.display = 'none';
   $('room').style.display = 'block';
@@ -174,11 +175,36 @@ $('send').onclick = () => {
 $('msg').onkeydown = (e) => e.key === 'Enter' && $('send').click();
 $('leave').onclick = leave;
 
+// ব্যাকগ্রাউন্ডে মাইক চালু রাখার সার্ভিস (শুধু Android অ্যাপে চলে)
+const FG = (window.Capacitor && Capacitor.isNativePlatform && Capacitor.isNativePlatform())
+  ? Capacitor.Plugins.ForegroundService : null;
+
+async function startBg() {
+  if (!FG) return;
+  try { await FG.requestPermissions(); } catch (e) {}
+  try {
+    await FG.createNotificationChannel({
+      id: 'voice', name: 'ভয়েস রুম', description: 'ভয়েস কল চলছে', importance: 2
+    });
+  } catch (e) {}
+  try {
+    await FG.startForegroundService({
+      id: 1, title: 'ভয়েস রুম', body: 'কথা চলছে...',
+      smallIcon: 'ic_stat_voice', notificationChannelId: 'voice'
+    });
+  } catch (e) { console.log('bg error', e); }
+}
+
+async function stopBg() {
+  if (!FG) return;
+  try { await FG.stopForegroundService(); } catch (e) {}
+}
+
 function leave() {
   Object.values(peers).forEach((p) => p.pc.close());
   if (socket) socket.disconnect();
   if (local) local.getTracks().forEach((t) => t.stop());
-  location.reload();
+  stopBg().then(() => location.reload());
 }
 </script>
 </body>
